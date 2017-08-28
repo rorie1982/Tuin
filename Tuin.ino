@@ -1,6 +1,7 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <RTClib.h>
+#include <Wire.h>
 
 #define Vh400Pin A0
 #define Inlite D6
@@ -12,43 +13,41 @@ struct VH400 {
   double voltage_sd;
   double VWC;
   double VWC_sd;
-  double timeStamp;
+  DateTime timeStamp;
 };
 
+struct chartData {
+  String dateTimeStamp;
+  String vwcMeanValue;
+};
+
+char daysOfTheWeek[7][12] = {"Zondag", "Maandag", "Dinsdag", "Woensdag", "Donderdag", "Vrijdag", "Zaterdag"};
+
 IPAddress ip(192, 168, 1, 105);
+ESP8266WebServer server(80);
+DateTime now;
+
 String currentHostName = "ESP-Tuin-01";
 String currentVersion = "1.0.0";
-long vh400LastInterval  = 0;
-ESP8266WebServer server(80);
-VH400 VWCMesurements[24];
-int counter = 0;
-struct VH400 VH400CurrentValue;
 String inliteGarrdenLights = "Uitgeschakelt";
+long vh400LastInterval  = 0;
+struct VH400 VH400CurrentValue;
+int counter = 0;
+
+chartData chartDataTable[24];
 RTC_DS3231 rtc;
 
 void setup() {
 
-  Serial.begin(9600);
+  //Serial.begin(9600);
   pinMode(Vh400Pin, OUTPUT);
   pinMode(Inlite, OUTPUT);
 
   digitalWrite(Inlite, HIGH);
-
-  if (! rtc.begin()) {
-    Serial.println("Couldn't find RTC");
-    while (1);
-  }
-
-   if (rtc.lostPower()) {
-    Serial.println("RTC lost power, lets set the time!");
-    // following line sets the RTC to the date & time this sketch was compiled
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    // This line sets the RTC with an explicit date & time, for example to set
-    // January 21, 2014 at 3am you would call:
-    // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
-  }
   
   ConnectToWifi();
+
+  InitializeRtcDS3231();
 
   server.on("/", handlePage);
   server.on("/json",handleJson);
@@ -60,33 +59,62 @@ void setup() {
   
 }
 
-void ReadAndStoreVH400Values()
-{
-  VH400CurrentValue = readVH400_wStats(100,50);
-  VWCMesurements[counter].VWC = VH400CurrentValue.VWC;
-  VWCMesurements[counter].timeStamp = VH400CurrentValue.timeStamp;
-}
-
 void loop() {
   
   //elk uur
   if (millis() - vh400LastInterval > 3600000)
-  {
-
-    counter = counter + 1;
-    
-    if (counter > 23)
-    {
-      counter = 0;
-    }
+  { 
+    counter++;
     
     ReadAndStoreVH400Values();
-
     vh400LastInterval = millis();
   }
 
   server.handleClient();
 
+}
+
+void ReadAndStoreVH400Values()
+{
+  VH400CurrentValue = readVH400_wStats(100,50);
+
+  if (now.hour() == 0)
+  {
+     counter = 0;
+  }
+  
+  chartDataTable[counter].vwcMeanValue = VH400CurrentValue.VWC;
+  chartDataTable[counter].dateTimeStamp = String(now.year()) + "," + String(now.month()-1) + "," + String(now.day()) + "," + String(now.hour()) + "," + String(now.minute()) + "," + String(now.second()); 
+  
+}
+
+void InitializeRtcDS3231()
+{
+  rtc.begin();
+  // if (rtc.lostPower()) {
+  //  Serial.println("RTC lost power, lets set the time!");
+  //  // following line sets the RTC to the date & time this sketch was compiled
+  //  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  //  // This line sets the RTC with an explicit date & time, for example to set
+  //  // January 21, 2014 at 3am you would call:
+  //  // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
+  //}
+  //now = rtc.now();
+  //Serial.println();
+  //Serial.print(now.year(), DEC);
+  //Serial.print('/');
+  //Serial.print(now.month(), DEC);
+  //Serial.print('/');
+  //Serial.print(now.day(), DEC);
+  //Serial.print(" (");
+  //Serial.print(daysOfTheWeek[now.dayOfTheWeek()]);
+  //Serial.print(") ");
+  //Serial.print(now.hour(), DEC);
+  //Serial.print(':');
+  //Serial.print(now.minute(), DEC);
+  //Serial.print(':');
+  //Serial.print(now.second(), DEC);
+  //Serial.println(); 
 }
 
 void handlePage()
@@ -99,6 +127,7 @@ void handlePage()
   webPage += "<head>";
   webPage += "<title>Tuin</title>";
   webPage += "<meta charset=\"utf-8\">";
+  webPage += "<meta name=\"apple-mobile-web-app-capable\" content=\"yes\">";
   webPage += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
   webPage += "<link rel=\"stylesheet\" href=\"https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css\">";
   webPage += GenerateFavIcon();
@@ -116,16 +145,24 @@ void handlePage()
   webPage += "<div class=\"panel-body\" id=\"curve_chart\"></div>";
   webPage += "<div class=\"panel-body\">";
   webPage += "<span class='glyphicon glyphicon-tint'></span>&nbsp;";
-  webPage += "Laatst gemeten: <span class='pull-right' id=\"TVH40001\"> %</span>";
+  webPage += "Laatst gemeten VWC: <span class='pull-right' id=\"TVH40001\"></span>";
   webPage += "</div>";
   webPage += "</div>";
+  
   webPage += "<div id=\"GPanelLights\" class=\"panel panel-default\">";
   webPage += "<div class=\"panel-heading\">Verlichting</div>";
   webPage += "<div class=\"panel-body\">";
-  webPage += "<span class='glyphicon glyphicon-lamp'></span>&nbsp;";
-  webPage += "Inlite: <span class='pull-right' id=\"TInlite01\"></span>";
+  webPage += "<span class='glyphicon glyphicon-hamburger'></span>&nbsp;";
+  webPage += "Inlite bediening:<span class='pull-right'>";
+  webPage += "<button type='button' class='btn btn-default' id='Inlite' onclick='ButtonPressed(this.id)'><span class=\"glyphicon glyphicon-menu-up\"></span></button>&nbsp;";
+  webPage += "</span>";
+  webPage += "</div>";
+  webPage += "<div class=\"panel-body\">";
+  webPage += "<span class='glyphicon glyphicon-lamp'></span>&nbsp;";  
+  webPage += "Tuinverlichting: <span class='pull-right' id=\"TInlite01\"></span>";
   webPage += "</div>";
   webPage += "</div>";
+  
   webPage += "<div class=\"panel panel-default\">";
   webPage += "<div class=\"panel-heading\">Algemeen</div>";
   webPage += "<div class=\"panel-body\">";
@@ -185,22 +222,27 @@ String GenerateJavaScript()
   javaScript += "$('#GPanelLights').removeClass('panel panel-success').addClass('panel panel-default');";
   javaScript += "}";
   javaScript += "}";
-  javaScript += "function DrawChart(data){"; 
+
+  javaScript += "function ButtonPressed(id){";
+  javaScript += "$.post('http://192.168.1.105/action?name=' + id + '&value=empty');";
+  javaScript += "}";
   
+  javaScript += "function DrawChart(data){"; 
   javaScript += "var chartdata = new google.visualization.DataTable(data);";
   javaScript += "var options = {";
   javaScript += "hAxis: {";
-  javaScript += "title: 'Time'";
+  javaScript += "title: 'Time',format: 'HH:mm'";
   javaScript += "},";
-  javaScript += "vAxis: {";
-  javaScript += "title: 'VWC%'";
+  javaScript += "vAxis: {viewWindowMode:'explicit',viewWindow: {max:50,min:0},";
+  javaScript += "title: 'VWC %'";
   javaScript += "},";
   javaScript += "title: 'Volumetric water content',";
-  javaScript += "legend: { position: 'right' },";
   javaScript += "pointSize: 5";
   javaScript += "};";
+
   
-  javaScript += "chart = new google.visualization.LineChart(document.getElementById('curve_chart'));";
+  
+  javaScript += "chart = new google.visualization.AreaChart(document.getElementById('curve_chart'));";
   
   javaScript += "chart.draw(chartdata, options);";
   
@@ -224,16 +266,15 @@ void handleJson()
   returnValue += "\"cols\": [{";
   returnValue += "\"label\":\"X \",\"type\": \"datetime\"";
   returnValue += "}, {";
-  returnValue += "\"label\":\"VWC %\",\"type\": \"number\"";
+  returnValue += "\"label\":\"" + String(daysOfTheWeek[now.dayOfTheWeek()]) + "\",\"type\": \"number\"";
   returnValue += "}],";
   returnValue += "\"rows\": [";
 
-  
-    
-  for (int i=0; i <= counter; i++){
-     returnValue += "{\"c\": [{ \"v\": \"Date(2017,9,10," + String(i) + ",0,0)\"},{\"v\":\"" + String(VWCMesurements[i].VWC) + "\"} ]},";
-  } 
-
+  for (int i = 0; i <=counter; i++)
+  {
+     returnValue += "{ \"c\": [{\"v\": \"Date(" + chartDataTable[i].dateTimeStamp + ")\"}, {\"v\": " + chartDataTable[i].vwcMeanValue + "}]},";
+  }
+     
   returnValue.remove(returnValue.length()-1);
   
   returnValue += "]";
@@ -242,7 +283,7 @@ void handleJson()
   returnValue += "\"state\": \"" + inliteGarrdenLights + "\"";
   returnValue += "},";
   returnValue += "\"VH400\": {";
-  returnValue += "\"value\": \"" + String(VWCMesurements[counter].VWC) + "\"";
+  returnValue += "\"value\": \"" + String(VH400CurrentValue.VWC) + " % (" + String(VH400CurrentValue.timeStamp.hour()) + ":" + String(VH400CurrentValue.timeStamp.minute()) + ":" + String(VH400CurrentValue.timeStamp.second()) + ")\"";
   returnValue += "}";
   returnValue += "}";
   returnValue += "}";
@@ -289,8 +330,21 @@ void handleAction()
       argumentValue = server.arg(1);
       if ( argumentName == "Inlite")
       {
-        inliteGarrdenLights = argumentValue;
-        ControlLights(argumentValue);
+        if (argumentValue == "empty")
+        {
+          if(inliteGarrdenLights == "Ingeschakelt")
+          {
+            argumentValue = "Uitgeschakelt";
+          }
+          else
+          {
+            argumentValue = "Ingeschakelt";
+          }
+        }
+
+      inliteGarrdenLights = argumentValue;
+      ControlLights(argumentValue);  
+      
       }
     }
   }
@@ -301,12 +355,10 @@ void ControlLights(String value)
   if (value == "Ingeschakelt" )
   {
     digitalWrite(Inlite, LOW);
-    Serial.print("on");
   }
   else
   {
     digitalWrite(Inlite, HIGH);
-    Serial.print("Off");
   }
 }
 
@@ -444,6 +496,9 @@ struct VH400 readVH400_wStats(int nMeasurements, int delayBetweenMeasurements) {
   result.voltage_sd = volts_stDev;
   result.VWC = VWC_mean;
   result.VWC_sd = VWC_stDev;
+
+  now = rtc.now();
+  result.timeStamp = now;
   
   // Return the result
   return(result);
