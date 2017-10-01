@@ -2,6 +2,8 @@
 #include <ESP8266WebServer.h>
 #include <RTClib.h>
 #include <Wire.h>
+#include <ESP8266HTTPUpdateServer.h>
+#include <Adafruit_AM2315.h>
 
 #define Vh400Pin A0
 #define Inlite D6
@@ -24,21 +26,29 @@ struct chartData {
 char daysOfTheWeek[7][12] = {"Zondag", "Maandag", "Dinsdag", "Woensdag", "Donderdag", "Vrijdag", "Zaterdag"};
 
 IPAddress ip(192, 168, 1, 105);
-ESP8266WebServer server(80);
+ESP8266WebServer httpServer(80);
+ESP8266HTTPUpdateServer httpUpdater;
 DateTime now;
 
 String currentHostName = "ESP-Tuin-01";
-String currentVersion = "1.0.0";
+String currentVersion = "1.2.2";
 String inliteGarrdenLights = "Uitgeschakelt";
 long vh400LastInterval  = 0;
+long am2315LastInterval = 0;
 struct VH400 VH400CurrentValue;
 int counter = 0;
+bool dst = true;
+float currentTemperatureSensorValue = 0;
+float currentHumiditySensorValue = 0;
 
 chartData chartDataTable[24];
 RTC_DS3231 rtc;
+Adafruit_AM2315 am2315;
 
 void setup() {
-
+  const char* username = "username";
+  const char* password = "password";
+  
   //Serial.begin(9600);
   pinMode(Vh400Pin, OUTPUT);
   pinMode(Inlite, OUTPUT);
@@ -48,14 +58,17 @@ void setup() {
   ConnectToWifi();
 
   InitializeRtcDS3231();
+  InitializeAM2315();
 
-  server.on("/", handlePage);
-  server.on("/json",handleJson);
-  server.on("/action",handleAction);
+  httpServer.on("/", handlePage);
+  httpServer.on("/json",handleJson);
+  httpServer.on("/action",handleAction);
 
   ReadAndStoreVH400Values();  
-  
-  server.begin();
+  ReadHumidityAndTemperature();
+
+  httpUpdater.setup(&httpServer, username, password);
+  httpServer.begin();
   
 }
 
@@ -65,13 +78,27 @@ void loop() {
   if (millis() - vh400LastInterval > 3600000)
   { 
     counter++;
-    
+    CheckForDSTAdjustment();
     ReadAndStoreVH400Values();
     vh400LastInterval = millis();
   }
 
-  server.handleClient();
+   //elke minuut
+  if (millis() - am2315LastInterval > 60000)
+  { 
+    ReadHumidityAndTemperature();
+    am2315LastInterval =  millis();
+  }
 
+  httpServer.handleClient();
+
+}
+
+void ReadHumidityAndTemperature()
+{ 
+  currentHumiditySensorValue = am2315.readHumidity();
+  delay(2000);
+  currentTemperatureSensorValue = am2315.readTemperature();
 }
 
 void ReadAndStoreVH400Values()
@@ -87,6 +114,31 @@ void ReadAndStoreVH400Values()
   chartDataTable[counter].dateTimeStamp = String(now.year()) + "," + String(now.month()-1) + "," + String(now.day()) + "," + String(now.hour()) + "," + String(now.minute()) + "," + String(now.second()); 
   
 }
+
+void CheckForDSTAdjustment()
+{
+  if (now.month() == 10 && now.day() >= 25 && String(daysOfTheWeek[now.dayOfTheWeek()]) == "Zondag" && now.hour() >= 2 && dst)
+  {
+     now = rtc.now();  
+     rtc.adjust(DateTime(now.year(), now.month(), now.day(), (now.hour()-1), now.minute(), now.second()));
+     counter--;
+     dst = false;
+  } 
+  
+  if (now.month() == 3 && now.day() >= 25 && String(daysOfTheWeek[now.dayOfTheWeek()]) == "Zondag" && now.hour() >= 2 && !dst) 
+  {
+     now = rtc.now();  
+     rtc.adjust(DateTime(now.year(), now.month(), now.day(), (now.hour()+1), now.minute(), now.second()));
+     counter++;
+     dst = true;
+  } 
+}
+
+void InitializeAM2315()
+{
+  am2315.begin();  
+}
+
 
 void InitializeRtcDS3231()
 {
@@ -148,13 +200,25 @@ void handlePage()
   webPage += "Laatst gemeten VWC: <span class='pull-right' id=\"TVH40001\"></span>";
   webPage += "</div>";
   webPage += "</div>";
+
+  webPage += "<div class=\"panel panel-default\">";
+  webPage += "<div class=\"panel-heading\">Klimaat</div>";
+  webPage += "<div class=\"panel-body\">";
+  webPage += "<span class='glyphicon glyphicon-fire'></span>&nbsp;";
+  webPage += "Temperatuur: <span class='pull-right' id='TTemp01'></span>";
+  webPage += "</div>";
+  webPage += "<div class=\"panel-body\">";
+  webPage += "<span class='glyphicon glyphicon-tint'></span>&nbsp;";
+  webPage += "Luchtvogtigheid: <span class='pull-right' id='THum01'></span>";
+  webPage += "</div>";
+  webPage += "</div>";
   
   webPage += "<div id=\"GPanelLights\" class=\"panel panel-default\">";
   webPage += "<div class=\"panel-heading\">Verlichting</div>";
   webPage += "<div class=\"panel-body\">";
-  webPage += "<span class='glyphicon glyphicon-hamburger'></span>&nbsp;";
+  webPage += "<span class='glyphicon glyphicon-menu-hamburger'></span>&nbsp;";
   webPage += "Inlite bediening:<span class='pull-right'>";
-  webPage += "<button type='button' class='btn btn-default' id='Inlite' onclick='ButtonPressed(this.id)'><span class=\"glyphicon glyphicon-menu-up\"></span></button>&nbsp;";
+  webPage += "<button type='button' class='btn btn-default' id='Inlite' onclick='ButtonPressed(this.id)'><span id=\"Tbuton01\">Aan</span></button>&nbsp;";
   webPage += "</span>";
   webPage += "</div>";
   webPage += "<div class=\"panel-body\">";
@@ -177,12 +241,16 @@ void handlePage()
   webPage += "<span class='glyphicon glyphicon-info-sign'></span>&nbsp;";
   webPage += "Host naam: <span class='pull-right'>" + currentHostName + "</span>";
   webPage += "</div>";
+  webPage += "<div class=\"panel-body\">";
+  webPage += "<span class='glyphicon glyphicon-info-sign'></span>&nbsp;";
+  webPage += "System date time: <span class='pull-right' id=\"TSystemTime01\"></span>";
+  webPage += "</div>";
   webPage += "</div>";
   webPage += "</div>";
   webPage += "</body>";
   webPage += "</html>";
 
-  server.send ( 200, "text/html", webPage);
+  httpServer.send ( 200, "text/html", webPage);
   
 }
 
@@ -211,15 +279,22 @@ String GenerateJavaScript()
   javaScript += "};";
   javaScript += "function UpdateLightsPanel(json){";
   javaScript += "$('#TInlite01').text(json.devices.Inlite.state);";
+                
   javaScript += "$('#TVH40001').text(json.devices.VH400.value);";
+  javaScript += "$('#TTemp01').text(json.devices.Temperature.value);";
+  javaScript += "$('#THum01').text(json.devices.Humidity.value);";
+  javaScript += "$('#TSystemTime01').text(json.devices.SystemTime.value);";
+
   javaScript += "var statusLights = $('#TInlite01').html();";
   javaScript += "if (statusLights == \"Ingeschakelt\")";
   javaScript += "{";
   javaScript += "$('#GPanelLights').removeClass('panel panel-default').addClass('panel panel-success');";
+  javaScript += "$('#Tbuton01').text(\" Uit\");";                 
   javaScript += "}";
   javaScript += "else";
   javaScript += "{";
   javaScript += "$('#GPanelLights').removeClass('panel panel-success').addClass('panel panel-default');";
+  javaScript += "$('#Tbuton01').text(\" Aan\");";
   javaScript += "}";
   javaScript += "}";
 
@@ -230,6 +305,7 @@ String GenerateJavaScript()
   javaScript += "function DrawChart(data){"; 
   javaScript += "var chartdata = new google.visualization.DataTable(data);";
   javaScript += "var options = {";
+  javaScript += "legend: { position: 'bottom' },";
   javaScript += "hAxis: {";
   javaScript += "title: 'Time',format: 'HH:mm'";
   javaScript += "},";
@@ -239,8 +315,6 @@ String GenerateJavaScript()
   javaScript += "title: 'Volumetric water content',";
   javaScript += "pointSize: 5";
   javaScript += "};";
-
-  
   
   javaScript += "chart = new google.visualization.AreaChart(document.getElementById('curve_chart'));";
   
@@ -249,7 +323,7 @@ String GenerateJavaScript()
   javaScript += "}";
   
   javaScript += "$(document).ready(function(){";
-  javaScript += "setInterval(GetJson,3000);";
+  javaScript += "setInterval(GetJson,5000);";
   javaScript += "});";
   javaScript += "</script>";
 
@@ -258,38 +332,52 @@ String GenerateJavaScript()
 
 void handleJson()
 {
-  String returnValue;
+  String JSON;
+  DateTime systemTime;
   
-  returnValue += "{";
-  returnValue += "\"devices\": {";
-  returnValue += "\"VH400History\": {";
-  returnValue += "\"cols\": [{";
-  returnValue += "\"label\":\"X \",\"type\": \"datetime\"";
-  returnValue += "}, {";
-  returnValue += "\"label\":\"" + String(daysOfTheWeek[now.dayOfTheWeek()]) + "\",\"type\": \"number\"";
-  returnValue += "}],";
-  returnValue += "\"rows\": [";
+  JSON += "{";
+  JSON += "\"devices\": {";
+  JSON += "\"VH400History\": {";
+  JSON += "\"cols\": [{";
+  JSON += "\"label\":\"X \",\"type\": \"datetime\"";
+  JSON += "}, {";
+  JSON += "\"label\":\"" + String(daysOfTheWeek[now.dayOfTheWeek()]) + "\",\"type\": \"number\"";
+  JSON += "}],";
+  JSON += "\"rows\": [";
 
   for (int i = 0; i <=counter; i++)
   {
-     returnValue += "{ \"c\": [{\"v\": \"Date(" + chartDataTable[i].dateTimeStamp + ")\"}, {\"v\": " + chartDataTable[i].vwcMeanValue + "}]},";
+     JSON += "{ \"c\": [{\"v\": \"Date(" + chartDataTable[i].dateTimeStamp + ")\"}, {\"v\": " + chartDataTable[i].vwcMeanValue + "}]},";
   }
      
-  returnValue.remove(returnValue.length()-1);
+  JSON.remove(JSON.length()-1);
   
-  returnValue += "]";
-  returnValue += "},";
-  returnValue += "\"Inlite\": {";
-  returnValue += "\"state\": \"" + inliteGarrdenLights + "\"";
-  returnValue += "},";
-  returnValue += "\"VH400\": {";
-  returnValue += "\"value\": \"" + String(VH400CurrentValue.VWC) + " % (" + String(VH400CurrentValue.timeStamp.hour()) + ":" + String(VH400CurrentValue.timeStamp.minute()) + ":" + String(VH400CurrentValue.timeStamp.second()) + ")\"";
-  returnValue += "}";
-  returnValue += "}";
-  returnValue += "}";
+  JSON += "]";
+  JSON += "},";
+  JSON += "\"Inlite\": {";
+  JSON += "\"state\": \"" + inliteGarrdenLights + "\"";
+  JSON += "},";
 
-  server.send ( 200, "text/html", returnValue);
+  systemTime = rtc.now();
+  JSON += "\"SystemTime\": {";
+  JSON += "\"value\": \"" + String(systemTime.year()) + "-" + String(systemTime.month()-1) + "-" + String(systemTime.day()) + ":" + String(systemTime.hour()) + ":" + String(systemTime.minute()) + ":" + String(systemTime.second()) + "\"";
+  JSON += "},";
+
+  JSON += "\"Humidity\": {";
+  JSON += "\"value\": \"" + String(currentHumiditySensorValue) + String(" %") + "\"";
+  JSON += "},";
+
+  JSON += "\"Temperature\": {";
+  JSON += "\"value\": \"" + String(currentTemperatureSensorValue) + String(" °C") + "\"";
+  JSON += "},";
   
+  JSON += "\"VH400\": {";
+  JSON += "\"value\": \"" + String(VH400CurrentValue.VWC) + " % (" + String(VH400CurrentValue.timeStamp.hour()) + ":" + String(VH400CurrentValue.timeStamp.minute()) + ")\"";
+  JSON += "}";
+  JSON += "}";
+  JSON += "}";
+
+  httpServer.send ( 200, "text/html", JSON);
 }
 
 String GenerateFavIcon()
@@ -320,14 +408,14 @@ void handleAction()
 {  
   String argumentName = "";
   String argumentValue = "";
-  if (server.args() > 0)
+  if (httpServer.args() > 0)
   {
     //server.arg(0) = name
     //server.arg(1) = value
-    if (server.arg(0).length() > 0 && server.arg(1).length() > 0)
+    if (httpServer.arg(0).length() > 0 && httpServer.arg(1).length() > 0)
     {
-      argumentName = server.arg(0);
-      argumentValue = server.arg(1);
+      argumentName = httpServer.arg(0);
+      argumentValue = httpServer.arg(1);
       if ( argumentName == "Inlite")
       {
         if (argumentValue == "empty")
@@ -364,8 +452,8 @@ void ControlLights(String value)
 
 void ConnectToWifi()
 {
-  char ssid[] = "";
-  char pass[] = "";
+  char ssid[] = "ssid";
+  char pass[] = "password";
   int i = 0;
 
   IPAddress gateway(192, 168, 1, 1);
@@ -374,16 +462,10 @@ void ConnectToWifi()
 
   WiFi.hostname(currentHostName);
   WiFi.begin(ssid, pass);
+  WiFi.mode(WIFI_STA);
 
-  if (WiFi.status() != WL_CONNECTED && i >= 30)
-  {
-    WiFi.disconnect();
-    delay(1000);
-  }
-  else
-  {
-    delay(5000);
-    ip = WiFi.localIP();
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
   }
 
 }
